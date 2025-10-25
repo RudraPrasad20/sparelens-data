@@ -186,7 +186,7 @@ async def get_data(
         pipeline += [
             {"$addFields": {"data_array": {"$objectToArray": "$data"}}},
             {"$match": {"data_array.v": {"$regex": search_query, "$options": "i"}}},
-            {"$project": {"data": 1, "data_array": 0}}
+            {"$project": {"data": 1}}
         ]
 
     sort_dir = -1 if sort_order == "desc" else 1
@@ -208,7 +208,12 @@ async def get_data(
 
     total_count = await row_data_collection.count_documents({"uploadedFileId": file_id})
     if search_query:
-        count_pipeline = pipeline[:2] + [{"$count": "total"}]
+        count_pipeline = [
+            {"$match": {"uploadedFileId": file_id}},
+            {"$addFields": {"data_array": {"$objectToArray": "$data"}}},
+            {"$match": {"data_array.v": {"$regex": search_query, "$options": "i"}}},
+            {"$count": "total"}
+        ]
         count_res = await row_data_collection.aggregate(count_pipeline).to_list(None)
         total_count = count_res[0]["total"] if count_res else 0
 

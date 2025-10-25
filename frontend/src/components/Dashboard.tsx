@@ -2,6 +2,7 @@ import React, {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   type ChangeEvent,
 } from "react";
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { FileUp, Loader2, Search, ArrowUpDown } from "lucide-react";
+import { FileUp, Loader2, ArrowUpDown } from "lucide-react";
 import axios from "axios";
 import {
   Dialog,
@@ -61,6 +62,15 @@ import {
   Cell,
 } from "recharts"; 
 import { ModeToggle } from "./modeToggle";
+import {
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+  type ColumnDef,
+  type SortingState,
+  type PaginationState,
+  type Updater,
+} from "@tanstack/react-table"
 
 interface UploadedFile {
   id: string;
@@ -69,7 +79,7 @@ interface UploadedFile {
 }
 
 interface TableData {
-  data: Record<string, any>[]; 
+  data: Record<string, unknown>[]; 
   total_count: number;
   page: number;
   page_size: number;
@@ -78,7 +88,7 @@ interface TableData {
 
 interface ChartApiResponse {
   chart_type: string;
-  data: Record<string, any>[]; 
+  data: Record<string, unknown>[]; 
   x_column: string;
   y_column: string;
 }
@@ -92,9 +102,8 @@ const DashboardPage: React.FC = () => {
   const [chartData, setChartData] = useState<ChartApiResponse | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  const [sortColumn, setSortColumn] = useState<string | null>(null);
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
-  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [globalFilter, setGlobalFilter] = useState<string>("");
   const [selectedXColumn, setSelectedXColumn] = useState<string | null>(null);
   const [selectedYColumn, setSelectedYColumn] = useState<string | null>(null);
   const [selectedChartType, setSelectedChartType] = useState<string>("bar");
@@ -138,13 +147,21 @@ const DashboardPage: React.FC = () => {
     setIsLoadingTable(true);
     setDataFetchError(null);
     try {
-      const params = {
+      const params: {
+        page: number;
+        page_size: number;
+        search_query: string;
+        sort_by?: string;
+        sort_order?: string;
+      } = {
         page: currentPage,
         page_size: pageSize,
-        sort_by: sortColumn,
-        sort_order: sortOrder,
-        search_query: searchQuery,
+        search_query: globalFilter,
       };
+      if (sorting.length > 0) {
+        params.sort_by = sorting[0].id;
+        params.sort_order = sorting[0].desc ? "desc" : "asc";
+      }
       const response = await axios.get<TableData>(
         `${API_BASE_URL}/data/${selectedFileId}`,
         {
@@ -152,36 +169,6 @@ const DashboardPage: React.FC = () => {
         }
       );
       setTableData(response.data);
-
-      if (response.data.columns.length > 0) {
-        if (
-          !selectedXColumn ||
-          !response.data.columns.includes(selectedXColumn)
-        ) {
-          setSelectedXColumn(response.data.columns[0]);
-        }
-        if (
-          !selectedYColumn ||
-          !response.data.columns.includes(selectedYColumn)
-        ) {
-          const numericColumn = response.data.columns.find((col) => {
-            return response.data.data
-              .slice(0, 5)
-              .some(
-                (row) =>
-                  typeof row[col] === "number" && !isNaN(row[col] as number)
-              );
-          });
-          setSelectedYColumn(
-            numericColumn ||
-              response.data.columns[1] ||
-              response.data.columns[0]
-          );
-        }
-      } else {
-        setSelectedXColumn(null);
-        setSelectedYColumn(null);
-      }
     } catch (error) {
       console.error("Error fetching data:", error);
       setTableData(null);
@@ -193,11 +180,8 @@ const DashboardPage: React.FC = () => {
     selectedFileId,
     currentPage,
     pageSize,
-    sortColumn,
-    sortOrder,
-    searchQuery,
-    selectedXColumn,
-    selectedYColumn,
+    sorting,
+    globalFilter,
   ]);
 
   const fetchChartData = useCallback(async () => {
@@ -237,6 +221,41 @@ const DashboardPage: React.FC = () => {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (tableData) {
+      const columns = tableData.columns;
+      if (columns.length > 0) {
+        if (
+          !selectedXColumn ||
+          !columns.includes(selectedXColumn)
+        ) {
+          setSelectedXColumn(columns[0]);
+        }
+        if (
+          !selectedYColumn ||
+          !columns.includes(selectedYColumn)
+        ) {
+          const numericColumn = columns.find((col) => {
+            return tableData.data
+              .slice(0, 5)
+              .some(
+                (row: Record<string, unknown>) =>
+                  typeof row[col] === "number" && !isNaN(row[col] as number)
+              );
+          });
+          setSelectedYColumn(
+            numericColumn ||
+              columns[1] ||
+              columns[0]
+          );
+        }
+      } else {
+        setSelectedXColumn(null);
+        setSelectedYColumn(null);
+      }
+    }
+  }, [tableData, selectedXColumn, selectedYColumn]);
 
   useEffect(() => {
     fetchChartData();
@@ -281,22 +300,84 @@ const DashboardPage: React.FC = () => {
   const handleFileSelect = (fileId: string) => {
     setSelectedFileId(fileId);
     setCurrentPage(1);
-    setSortColumn(null);
-    setSearchQuery("");
+    setSorting([]);
+    setGlobalFilter("");
   };
 
-  const handleSort = (column: string) => {
-    if (sortColumn === column) {
-      setSortOrder(sortOrder === "asc" ? "desc" : "asc");
-    } else {
-      setSortColumn(column);
-      setSortOrder("asc");
-    }
-  };
+  const columns = useMemo<ColumnDef<Record<string, unknown>>[]>(
+    () =>
+      tableData?.columns.map((column) => ({
+        accessorKey: column,
+        header: ({ column: col }) => (
+          <Button
+            variant="ghost"
+            onClick={col.getToggleSortingHandler()}
+            className="h-8 px-3 py-1 w-full justify-start hover:bg-muted gap-2"
+          >
+            <span className="truncate text-left font-medium">{col.id}</span>
+            {col.getCanSort() && (
+              <ArrowUpDown
+                className={`h-3 w-3 shrink-0 ${
+                  col.getIsSorted() === "desc" ? "rotate-180" : ""
+                }`}
+              />
+            )}
+          </Button>
+        ),
+        cell: ({ row }) => (
+          <div className="px-3 py-2">{String(row.getValue(column) ?? "")}</div>
+        ),
+      })) ?? [],
+    [tableData?.columns]
+  );
 
-  const totalPages = tableData
-    ? Math.ceil(tableData.total_count / pageSize)
-    : 0;
+  const table = useReactTable<Record<string, unknown>>({
+    data: tableData?.data ?? [],
+    columns,
+    manualPagination: true,
+    manualSorting: true,
+    manualFiltering: true,
+    pageCount: tableData ? Math.ceil(tableData.total_count / pageSize) : 0,
+    state: {
+      sorting,
+      pagination: {
+        pageIndex: currentPage - 1,
+        pageSize,
+      },
+    },
+    onSortingChange: useCallback(
+      (updaterOrValue: Updater<SortingState> | SortingState) => {
+        const newSorting =
+          typeof updaterOrValue === "function"
+            ? updaterOrValue(sorting)
+            : updaterOrValue;
+        setSorting(newSorting);
+        setCurrentPage(1);
+      },
+      [sorting]
+    ),
+    onPaginationChange: useCallback(
+      (updaterOrValue: Updater<PaginationState> | PaginationState) => {
+        const newPagination =
+          typeof updaterOrValue === "function"
+            ? updaterOrValue({
+                pageIndex: currentPage - 1,
+                pageSize,
+              })
+            : updaterOrValue;
+        setPageSize(newPagination.pageSize);
+        setCurrentPage(newPagination.pageIndex + 1);
+        if (newPagination.pageSize !== pageSize) {
+          setCurrentPage(1);
+        }
+      },
+      [currentPage, pageSize]
+    ),
+    getCoreRowModel: getCoreRowModel(),
+  });
+
+  const totalPages = table.getPageCount();
+
   const chartColors = chartData?.data
     ? generateColors(chartData.data.length)
     : [];
@@ -388,127 +469,134 @@ const DashboardPage: React.FC = () => {
         <Card className="col-span-3">
           <CardHeader>
             <CardTitle>Data Table</CardTitle>
-            <div className="flex items-center space-x-2 mt-2">
-              <Search className="h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search data (backend not implemented for data column search yet)..."
-                className="flex-1"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                disabled={isLoadingTable || !selectedFileId}
-              />
-            </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-0">
             {!selectedFileId ? (
-              <p className="text-center text-muted-foreground">
+              <p className="text-center text-muted-foreground p-8">
                 Select a file to view data.
               </p>
             ) : dataFetchError ? (
-              <p className="text-center text-red-500">{dataFetchError}</p>
+              <p className="text-center text-red-500 p-8">{dataFetchError}</p>
             ) : isLoadingTable && !tableData ? (
               <div className="flex justify-center items-center h-40">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
               </div>
-            ) : (
-              <>
-                <div className="overflow-x-auto rounded-md border">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        {tableData?.columns.map((column) => (
-                          <TableHead key={column}>
-                            <Button
-                              variant="ghost"
-                              onClick={() => handleSort(column)}
-                              className="px-0 py-0 h-auto"
-                            >
-                              {column}
-                              {sortColumn === column && (
-                                <ArrowUpDown
-                                  className={`ml-2 h-3 w-3 ${
-                                    sortOrder === "desc" ? "rotate-180" : ""
-                                  }`}
-                                />
-                              )}
-                            </Button>
-                          </TableHead>
-                        ))}
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {tableData?.data.map((row, rowIndex) => (
-                        <TableRow key={rowIndex}>
-                          {tableData.columns.map((column) => (
-                            <TableCell key={column}>
-                              {String(row[column] ?? "")}
-                            </TableCell>
-                          ))}
-                        </TableRow>
-                      ))}
-                      {tableData?.data.length === 0 && (
-                        <TableRow>
-                          <TableCell
-                            colSpan={tableData.columns.length}
-                            className="h-24 text-center"
-                          >
-                            No results found.
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </TableBody>
-                  </Table>
-                </div>
-                <Pagination className="mt-4 flex justify-between items-center">
-                  <div>
-                    Page {currentPage} of {totalPages} (Total{" "}
-                    {tableData?.total_count} records)
+            ) : tableData ? (
+              <div className="space-y-4">
+                <div className="rounded-md border">
+                  <div className="flex items-center py-4 px-4">
+                    <Input
+                      placeholder="Search data..."
+                      value={globalFilter ?? ""}
+                      onChange={(event) => {
+                        setGlobalFilter(event.target.value);
+                        setCurrentPage(1);
+                      }}
+                      className="max-w-sm"
+                    />
                   </div>
-                  <PaginationContent>
-                    <PaginationItem>
-                      <PaginationPrevious
-                        onClick={() =>
-                          setCurrentPage((prev) => Math.max(1, prev - 1))
-                        }
-                        isActive={currentPage > 1}
-                      />
-                    </PaginationItem>
-                    <PaginationItem>
-                      <PaginationLink
-                        isActive={true}
-                        className="cursor-default"
-                      >
-                        {currentPage}
-                      </PaginationLink>
-                    </PaginationItem>
-                    <PaginationItem>
-                      <PaginationNext
-                        onClick={() =>
-                          setCurrentPage((prev) =>
-                            Math.min(totalPages, prev + 1)
-                          )
-                        }
-                        isActive={currentPage < totalPages}
-                      />
-                    </PaginationItem>
-                  </PaginationContent>
-                  <Select
-                    value={String(pageSize)}
-                    onValueChange={(value) => setPageSize(Number(value))}
-                  >
-                    <SelectTrigger className="w-[100px]">
-                      <SelectValue placeholder="Page Size" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="5">5</SelectItem>
-                      <SelectItem value="10">10</SelectItem>
-                      <SelectItem value="25">25</SelectItem>
-                      <SelectItem value="50">50</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Pagination>
-              </>
-            )}
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        {table.getHeaderGroups().map((headerGroup) => (
+                          <TableRow key={headerGroup.id}>
+                            {headerGroup.headers.map((header) => (
+                              <TableHead key={header.id}>
+                                {header.isPlaceholder
+                                  ? null
+                                  : flexRender(
+                                      header.column.columnDef.header,
+                                      header.getContext()
+                                    )}
+                              </TableHead>
+                            ))}
+                          </TableRow>
+                        ))}
+                      </TableHeader>
+                      <TableBody>
+                        {table.getRowModel().rows?.length ? (
+                          table.getRowModel().rows.map((row) => (
+                            <TableRow
+                              key={row.id}
+                              data-state={row.getIsSelected() && "selected"}
+                            >
+                              {row.getVisibleCells().map((cell) => (
+                                <TableCell key={cell.id}>
+                                  {flexRender(
+                                    cell.column.columnDef.cell,
+                                    cell.getContext()
+                                  )}
+                                </TableCell>
+                              ))}
+                            </TableRow>
+                          ))
+                        ) : (
+                          <TableRow>
+                            <TableCell
+                              colSpan={columns.length}
+                              className="h-24 text-center"
+                            >
+                              No results.
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  <div className="border-t bg-muted/50">
+                    <div className="flex items-center justify-between space-x-2 p-4">
+                      <div className="flex-1 text-sm text-muted-foreground">
+                        Page {currentPage} of {totalPages} • {tableData.total_count} total records
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <Pagination className="m-0">
+                          <PaginationContent>
+                            <PaginationItem>
+                              <PaginationPrevious 
+                                onClick={() => table.previousPage()}
+                                className={!table.getCanPreviousPage() ? "pointer-events-none opacity-50" : ""}
+                              >
+                                Previous
+                              </PaginationPrevious>
+                            </PaginationItem>
+                            <PaginationItem>
+                              <PaginationLink
+                                isActive
+                                className="pointer-events-none"
+                              >
+                                {currentPage}
+                              </PaginationLink>
+                            </PaginationItem>
+                            <PaginationItem>
+                              <PaginationNext 
+                                onClick={() => table.nextPage()}
+                                className={!table.getCanNextPage() ? "pointer-events-none opacity-50" : ""}
+                              >
+                                Next
+                              </PaginationNext>
+                            </PaginationItem>
+                          </PaginationContent>
+                        </Pagination>
+                        <Select
+                          value={String(pageSize)}
+                          onValueChange={(value) => table.setPageSize(Number(value))}
+                        >
+                          <SelectTrigger className="w-[100px]">
+                            <SelectValue placeholder="Page Size" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="5">5</SelectItem>
+                            <SelectItem value="10">10</SelectItem>
+                            <SelectItem value="25">25</SelectItem>
+                            <SelectItem value="50">50</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </div>
@@ -594,7 +682,7 @@ const DashboardPage: React.FC = () => {
               </p>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                {selectedChartType === "bar" && (
+                {selectedChartType === "bar" ? (
                   <BarChart data={chartData.data}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
@@ -609,8 +697,7 @@ const DashboardPage: React.FC = () => {
                     <Legend />
                     <Bar dataKey={chartData.y_column} fill="#8884d8" />
                   </BarChart>
-                )}
-                {selectedChartType === "line" && (
+                ) : selectedChartType === "line" ? (
                   <LineChart data={chartData.data}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
@@ -630,8 +717,7 @@ const DashboardPage: React.FC = () => {
                       activeDot={{ r: 8 }}
                     />
                   </LineChart>
-                )}
-                {selectedChartType === "pie" && (
+                ) : (
                   <PieChart>
                     <Pie
                       data={chartData.data}
@@ -643,7 +729,7 @@ const DashboardPage: React.FC = () => {
                       fill="#8884d8"
                       label
                     >
-                      {chartData.data.map((entry, index) => (
+                      {chartData.data.map((_, index) => (
                         <Cell
                           key={`cell-${index}`}
                           fill={chartColors[index % chartColors.length]}
